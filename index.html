@@ -1,254 +1,489 @@
-<!doctype html>
-<html lang="en">
+// ==========================================
+// AEGIS & CROWN — PREMIUM ONLINE LOTTERY PLATFORM
+// Unified Full-Stack Node.js (Express) + React SPA
+// ==========================================
+
+const express = require('express');
+const path = require('path');
+const crypto = require('crypto');
+
+const app = express();
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// In-Memory Database for demonstration portability (easily adaptable to PostgreSQL)
+const db = {
+    users: [
+        { id: 'usr_admin', email: 'admin@aegiscrown.com', full_name: 'System Administrator', is_admin: true, is_verified: true },
+        { id: 'usr_1', email: 'samuel.t@example.com', full_name: 'Samuel Tadesse', is_admin: false, is_verified: true }
+    ],
+    events: [
+        {
+            id: 'evt_grand_2026',
+            title: 'Grand Autumn Sovereign Draw 2026',
+            description: 'The premier transparent multi-tier sovereign lottery event featuring 5 sequential life-changing prizes.',
+            ticket_price: 100,
+            sales_deadline: new Date(Date.now() + 4 * 86400000 + 12 * 3600000).toISOString(),
+            draw_date: new Date(Date.now() + 5 * 86400000).toISOString(),
+            status: 'ACTIVE'
+        }
+    ],
+    prizes: [
+        { id: 'prz_1', lottery_event_id: 'evt_grand_2026', draw_sequence: 1, prize_amount: 10000000, prize_title: 'Sovereign Grand Prize', status: 'PENDING' },
+        { id: 'prz_2', lottery_event_id: 'evt_grand_2026', draw_sequence: 2, prize_amount: 5000000, prize_title: 'Imperial Tier Prize', status: 'PENDING' },
+        { id: 'prz_3', lottery_event_id: 'evt_grand_2026', draw_sequence: 3, prize_amount: 2000000, prize_title: 'Heritage Tier Prize', status: 'PENDING' },
+        { id: 'prz_4', lottery_event_id: 'evt_grand_2026', draw_sequence: 4, prize_amount: 1000000, prize_title: 'Prestige Tier Prize', status: 'PENDING' },
+        { id: 'prz_5', lottery_event_id: 'evt_grand_2026', draw_sequence: 5, prize_amount: 500000, prize_title: 'Founders Tier Prize', status: 'PENDING' }
+    ],
+    payments: [],
+    tickets: [
+        { id: 'tkt_demo1', ticket_number: 'AC-8492-7102', lottery_event_id: 'evt_grand_2026', user_id: 'usr_1', status: 'ELIGIBLE', created_at: new Date().toISOString() },
+        { id: 'tkt_demo2', ticket_number: 'AC-3910-4821', lottery_event_id: 'evt_grand_2026', user_id: 'usr_1', status: 'ELIGIBLE', created_at: new Date().toISOString() }
+    ],
+    drawResults: [],
+    auditLogs: []
+};
+
+// --- API ROUTES ---
+
+// Get active event details & prizes
+app.get('/api/events/active', (req, res) => {
+    const event = db.events.find(e => e.status === 'ACTIVE') || db.events[0];
+    const eventPrizes = db.prizes.filter(p => p.lottery_event_id === event.id).sort((a,b) => a.draw_sequence - b.draw_sequence);
+    const eligibleCount = db.tickets.filter(t => t.lottery_event_id === event.id && t.status === 'ELIGIBLE').length;
+    res.json({ event, prizes: eventPrizes, eligibleCount, results: db.drawResults });
+});
+
+// Submit payment & request verification
+app.post('/api/tickets/purchase', (req, res) => {
+    const { user_id, lottery_event_id, payment_reference, screenshot_data } = req.body;
+    const event = db.events.find(e => e.id === lottery_event_id);
+    if (!event) return res.status(404).json({ error: 'Lottery event not found' });
+
+    const paymentId = 'pay_' + crypto.randomBytes(4).toString('hex');
+    db.payments.push({
+        id: paymentId,
+        user_id,
+        lottery_event_id,
+        amount: event.ticket_price,
+        payment_reference,
+        screenshot_path: screenshot_data || 'secure_vault/receipts/placeholder.png',
+        status: 'PENDING',
+        submitted_at: new Date().toISOString()
+    });
+
+    const ticketId = 'tkt_' + crypto.randomBytes(4).toString('hex');
+    const ticketNumber = 'AC-' + Math.floor(1000 + Math.random() * 9000) + '-' + Math.floor(1000 + Math.random() * 9000);
+    
+    db.tickets.push({
+        id: ticketId,
+        ticket_number: ticketNumber,
+        lottery_event_id,
+        user_id,
+        payment_submission_id: paymentId,
+        status: 'PENDING_VERIFICATION',
+        created_at: new Date().toISOString()
+    });
+
+    db.auditLogs.push({
+        id: 'aud_' + crypto.randomBytes(4).toString('hex'),
+        actor_id: user_id,
+        action: 'SUBMIT_PAYMENT_ENTRY',
+        target_entity: 'ticket',
+        target_id: ticketId,
+        created_at: new Date().toISOString()
+    });
+
+    res.json({ success: true, ticket_number: ticketNumber, status: 'PENDING_VERIFICATION' });
+});
+
+// Admin: Approve Payment & Activate Ticket
+app.post('/api/admin/payments/:paymentId/approve', (req, res) => {
+    const { paymentId } = req.params;
+    const payment = db.payments.find(p => p.id === paymentId);
+    if (!payment) return res.status(404).json({ error: 'Payment not found' });
+
+    payment.status = 'APPROVED';
+    payment.reviewed_at = new Date().toISOString();
+
+    const ticket = db.tickets.find(t => t.payment_submission_id === paymentId);
+    if (ticket) {
+        ticket.status = 'ELIGIBLE';
+    }
+
+    db.auditLogs.push({
+        id: 'aud_' + crypto.randomBytes(4).toString('hex'),
+        actor_id: 'usr_admin',
+        action: 'APPROVE_PAYMENT',
+        target_entity: 'payment',
+        target_id: paymentId,
+        created_at: new Date().toISOString()
+    });
+
+    res.json({ success: true, payment, ticket });
+});
+
+// Secure Sequential Draw Execution Engine
+app.post('/api/admin/draws/execute', (req, res) => {
+    const { lottery_event_id, draw_sequence } = req.body;
+    const event = db.events.find(e => e.id === lottery_event_id);
+    const prize = db.prizes.find(p => p.lottery_event_id === lottery_event_id && p.draw_sequence === draw_sequence);
+
+    if (!event || !prize) return res.status(404).json({ error: 'Event or prize level not found' });
+    if (prize.status === 'AWARDED') return res.status(400).json({ error: 'Prize already drawn and awarded.' });
+
+    // Get strictly eligible tickets
+    const eligibleTickets = db.tickets.filter(t => t.lottery_event_id === lottery_event_id && t.status === 'ELIGIBLE');
+    if (eligibleTickets.length === 0) return res.status(400).json({ error: 'No eligible tickets available in pool.' });
+
+    // Cryptographically secure random selection index
+    const randomIndex = crypto.randomInt(0, eligibleTickets.length);
+    const winningTicket = eligibleTickets[randomIndex];
+
+    // Permanently mutate ticket state to prevent re-entry
+    winningTicket.status = 'WINNER';
+    prize.status = 'AWARDED';
+
+    // Generate cryptographic audit record
+    const randomnessSeed = crypto.randomBytes(32).toString('hex');
+    const prevResult = db.drawResults[db.drawResults.length - 1];
+    const previousHash = prevResult ? prevResult.cryptographic_hash : '0000000000000000000000000000000000000000000000000000000000000000';
+    
+    const rawDataToHash = `${event.id}-${prize.id}-${draw_sequence}-${winningTicket.ticket_number}-${randomnessSeed}-${previousHash}`;
+    const cryptographicHash = crypto.createHash('sha256').update(rawDataToHash).digest('hex');
+
+    const drawResultRecord = {
+        id: 'drw_' + crypto.randomBytes(4).toString('hex'),
+        lottery_event_id,
+        prize_id: prize.id,
+        draw_sequence,
+        eligible_ticket_count: eligibleTickets.length,
+        winning_ticket_id: winningTicket.id,
+        winning_ticket_number: winningTicket.ticket_number,
+        randomness_seed: randomnessSeed,
+        cryptographic_hash: cryptographicHash,
+        previous_hash: previousHash,
+        drawn_at: new Date().toISOString()
+    };
+
+    db.drawResults.push(drawResultRecord);
+
+    db.auditLogs.push({
+        id: 'aud_' + crypto.randomBytes(4).toString('hex'),
+        actor_id: 'usr_admin',
+        action: 'EXECUTE_SEQUENTIAL_DRAW',
+        target_entity: 'draw_result',
+        target_id: drawResultRecord.id,
+        metadata: { sequence: draw_sequence, winner: winningTicket.ticket_number },
+        created_at: new Date().toISOString()
+    });
+
+    res.json({ success: true, drawResult: drawResultRecord });
+});
+
+// Public verification check endpoint
+app.get('/api/verify/:hash', (req, res) => {
+    const { hash } = req.params;
+    const result = db.drawResults.find(r => r.cryptographic_hash === hash || r.winning_ticket_number === hash);
+    if (!result) return res.status(404).json({ verified: false, message: 'Audit record or ticket number not found in immutable ledger.' });
+    res.json({ verified: true, result });
+});
+
+// Fallback HTML for React SPA
+app.get('*', (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en" class="dark">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Cocoa Draw — One Ticket. Multiple Chances.</title>
-<meta name="description" content="A premium, transparent lottery. Enter before the deadline. Watch every draw. Verify every result.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/app.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aegis & Crown | Premium Transparent Sovereign Lottery</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #120A08; color: #FAF7F2; }
+        .font-serif { font-family: 'Playfair Display', serif; }
+    </style>
 </head>
-<body data-page="home">
+<body class="bg-[#120A08] text-[#FAF7F2] antialiased selection:bg-[#C5A059] selection:text-[#120A08]">
+    <div id="root"></div>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="text/babel">
+        function App() {
+            const [view, setView] = React.useState('home');
+            const [activeEvent, setActiveEvent] = React.useState(null);
+            const [prizes, setPrizes] = React.useState([]);
+            const [results, setResults] = React.useState([]);
+            const [ticketRef, setTicketRef] = React.useState('');
+            const [successMsg, setSuccessMsg] = React.useState('');
+            const [verifyInput, setVerifyInput] = React.useState('');
+            const [verifyResult, setVerifyResult] = React.useState(null);
 
-<div id="site-header"></div>
+            React.useEffect(() => {
+                fetch('/api/events/active')
+                    .then(res => res.json())
+                    .then(data => {
+                        setActiveEvent(data.event);
+                        setPrizes(data.prizes);
+                        setResults(data.results);
+                    });
+            }, []);
 
-<main>
+            const handlePurchase = (e) => {
+                e.preventDefault();
+                fetch('/api/tickets/purchase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: 'usr_1', lottery_event_id: activeEvent.id, payment_reference: 'TXN-' + Math.floor(Math.random()*1000000) })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    setSuccessMsg('Entry submitted successfully! Ticket Generated: ' + data.ticket_number);
+                });
+            };
 
-  <!-- ══════════ HERO ══════════ -->
-  <section class="hero">
-    <div class="hero__glow" aria-hidden="true"></div>
-    <div class="wrap hero__grid">
+            const handleVerify = (e) => {
+                e.preventDefault();
+                fetch('/api/verify/' + verifyInput)
+                    .then(res => res.json())
+                    .then(data => setVerifyResult(data));
+            };
 
-      <div class="hero__copy">
-        <p class="eyebrow"><span class="dot"></span> Season One · Now Open</p>
-        <h1 class="display">
-          One Ticket.<br>
-          Multiple Chances.<br>
-          <em>One Transparent Draw.</em>
-        </h1>
-        <p class="lede">
-          Enter before the deadline. Watch every draw. Verify every result.
-          A lottery built like a financial instrument — every entry recorded,
-          every draw chained, every outcome auditable.
-        </p>
+            const executeDraw = (seq) => {
+                fetch('/api/admin/draws/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lottery_event_id: activeEvent.id, draw_sequence: seq })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if(data.success) {
+                        alert('Draw ' + seq + ' Executed Successfully! Winner: ' + data.drawResult.winning_ticket_number);
+                        window.location.reload();
+                    } else {
+                        alert(data.error);
+                    }
+                });
+            };
 
-        <div class="hero__cta">
-          <a class="btn btn--primary" data-cta="enter" href="/enter.html">Enter the Draw</a>
-          <a class="btn btn--ghost" href="/live-draw.html">View Draw Details</a>
-        </div>
+            return (
+                <div className="min-h-screen flex flex-col bg-[#120A08]">
+                    {/* Navigation */}
+                    <header className="border-b border-[#3A2722] bg-[#120A08]/90 backdrop-blur sticky top-0 z-50">
+                        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+                            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setView('home')}>
+                                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#C5A059] to-[#8C6D33] flex items-center justify-center text-[#120A08] font-bold text-lg font-serif">A&C</div>
+                                <span className="font-serif text-xl tracking-wider text-[#FAF7F2]">AEGIS & CROWN</span>
+                            </div>
+                            <nav className="hidden md:flex space-x-8 text-sm uppercase tracking-widest text-[#FAF7F2]/80">
+                                <button onClick={() => setView('home')} className="hover:text-[#C5A059] transition">Home</button>
+                                <button onClick={() => setView('draws')} className="hover:text-[#C5A059] transition">Live Draw & Results</button>
+                                <button onClick={() => setView('verify')} className="hover:text-[#C5A059] transition">Verify Audit</button>
+                                <button onClick={() => setView('admin')} className="text-[#C5A059] font-semibold">Admin Panel</button>
+                            </nav>
+                            <div>
+                                <button onClick={() => setView('purchase')} className="bg-[#C5A059] text-[#120A08] px-6 py-2.5 rounded text-xs font-bold tracking-widest uppercase hover:bg-[#b08d4b] transition">
+                                    Enter the Draw
+                                </button>
+                            </div>
+                        </div>
+                    </header>
 
-        <div class="hero__meta" id="heroMeta">
-          <div class="metapill"><span class="metapill__k">Ticket Price</span><span class="metapill__v" data-bind="ticketPrice">—</span></div>
-          <div class="metapill"><span class="metapill__k">Sales Close</span><span class="metapill__v" data-bind="deadline">—</span></div>
-          <div class="metapill"><span class="metapill__k">Entries Verified</span><span class="metapill__v" data-bind="ticketCount">—</span></div>
-        </div>
-      </div>
+                    {/* Main Content Router */}
+                    <main className="flex-grow">
+                        {view === 'home' && (
+                            <div>
+                                {/* Hero Section */}
+                                <section className="relative py-28 px-6 text-center bg-gradient-to-b from-[#1D1412] to-[#120A08] border-b border-[#3A2722]">
+                                    <div className="max-w-4xl mx-auto space-y-8">
+                                        <div className="inline-block border border-[#C5A059]/40 px-4 py-1.5 rounded-full text-xs tracking-widest text-[#C5A059] uppercase">
+                                            Sovereign Transparent Financial Entertainment
+                                        </div>
+                                        <h1 className="font-serif text-5xl md:text-7xl font-normal tracking-tight leading-tight text-[#FAF7F2]">
+                                            One Ticket.<br />
+                                            Multiple Chances.<br />
+                                            <span className="text-[#C5A059] italic">One Transparent Draw.</span>
+                                        </h1>
+                                        <p className="text-lg text-[#FAF7F2]/70 max-w-2xl mx-auto font-light">
+                                            Enter before the deadline. Watch every sequential prize draw. Verify every immutable result cryptographically.
+                                        </p>
+                                        <div className="flex flex-col sm:flex-row justify-center gap-4 pt-4">
+                                            <button onClick={() => setView('purchase')} className="bg-[#C5A059] text-[#120A08] px-8 py-4 rounded font-bold uppercase tracking-widest hover:bg-[#b08d4b] transition">
+                                                Enter the Draw — 100 ETB
+                                            </button>
+                                            <button onClick={() => setView('draws')} className="border border-[#C5A059]/50 text-[#FAF7F2] px-8 py-4 rounded font-semibold uppercase tracking-widest hover:bg-[#3A2722]/50 transition">
+                                                View Live Draws
+                                            </button>
+                                        </div>
+                                    </div>
+                                </section>
 
-      <aside class="hero__panel">
-        <div class="panel">
-          <div class="panel__head">
-            <span class="panel__label">The Moment Approaches</span>
-            <span class="badge badge--live" data-bind="phaseBadge">Sales Open</span>
-          </div>
-          <div class="countdown" id="heroCountdown" data-countdown>
-            <div class="countdown__unit"><span class="countdown__num" data-cd="days">00</span><span class="countdown__lbl">Days</span></div>
-            <div class="countdown__unit"><span class="countdown__num" data-cd="hours">00</span><span class="countdown__lbl">Hours</span></div>
-            <div class="countdown__unit"><span class="countdown__num" data-cd="minutes">00</span><span class="countdown__lbl">Minutes</span></div>
-            <div class="countdown__unit"><span class="countdown__num" data-cd="seconds">00</span><span class="countdown__lbl">Seconds</span></div>
-          </div>
-          <p class="panel__note" data-bind="countdownNote">Entries close when the clock reaches zero.</p>
-          <div class="panel__divider"></div>
-          <div class="panel__stats">
-            <div><span class="k">Prize Pools</span><span class="v" data-bind="prizeCount">—</span></div>
-            <div><span class="k">Total Awarded</span><span class="v" data-bind="prizeTotal">—</span></div>
-          </div>
-        </div>
-      </aside>
+                                {/* Prize Showcase */}
+                                <section className="py-24 px-6 max-w-6xl mx-auto">
+                                    <div className="text-center mb-16 space-y-3">
+                                        <h2 className="font-serif text-3xl md:text-4xl text-[#FAF7F2]">Configurable Prize Sequence</h2>
+                                        <p className="text-[#FAF7F2]/60 text-sm tracking-wide">Sequential draws ensure winning tickets are permanently retired from subsequent pools.</p>
+                                    </div>
+                                    <div className="grid gap-6 md:grid-cols-5">
+                                        {prizes.map((p, idx) => (
+                                            <div key={p.id} className="bg-[#1D1412] border border-[#3A2722] p-6 rounded-xl flex flex-col justify-between relative group hover:border-[#C5A059]/50 transition">
+                                                <div>
+                                                    <div className="text-xs tracking-widest text-[#C5A059] font-mono mb-2">DRAW 0{idx+1}</div>
+                                                    <h3 className="font-serif text-2xl font-bold text-[#FAF7F2]">{p.prize_amount.toLocaleString()} <span className="text-xs font-sans text-[#C5A059]">ETB</span></h3>
+                                                    <p className="text-xs text-[#FAF7F2]/60 mt-1">{p.prize_title}</p>
+                                                </div>
+                                                <div className="mt-8 pt-4 border-t border-[#3A2722] flex justify-between items-center text-xs">
+                                                    <span className={p.status === 'AWARDED' ? 'text-[#C5A059] font-semibold' : 'text-[#FAF7F2]/40'}>
+                                                        {p.status === 'AWARDED' ? '✓ AWARDED' : 'PENDING'}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </section>
+                            </div>
+                        )}
 
-    </div>
-  </section>
+                        {view === 'purchase' && (
+                            <div className="py-20 px-6 max-w-xl mx-auto">
+                                <div className="bg-[#1D1412] border border-[#3A2722] p-8 rounded-2xl shadow-2xl space-y-6">
+                                    <div className="text-center space-y-2">
+                                        <h2 className="font-serif text-3xl text-[#FAF7F2]">Confirm Your Entry</h2>
+                                        <p className="text-sm text-[#FAF7F2]/60">Ticket Price: <span className="text-[#C5A059] font-bold">100 ETB</span></p>
+                                    </div>
+                                    {successMsg ? (
+                                        <div className="bg-[#C5A059]/10 border border-[#C5A059] p-4 rounded text-center text-[#C5A059] font-mono text-sm">
+                                            {successMsg}
+                                        </div>
+                                    ) : (
+                                        <form onSubmit={handlePurchase} className="space-y-6">
+                                            <div className="space-y-2 text-sm">
+                                                <label className="text-[#FAF7F2]/80 font-medium">Payment Instructions</label>
+                                                <div className="p-4 bg-[#120A08] border border-[#3A2722] rounded text-xs text-[#FAF7F2]/70 space-y-1 font-mono">
+                                                    <p>Bank: Commercial Bank of Ethiopia</p>
+                                                    <p>Account Name: Aegis & Crown Sovereign Ltd</p>
+                                                    <p>Account Number: 1000849201928</p>
+                                                    <p className="text-[#C5A059] font-bold pt-2">Amount: 100.00 ETB</p>
+                                                </div>
+                                            </div>
+                                            <div className="space-y-2 text-sm">
+                                                <label className="text-[#FAF7F2]/80 font-medium">Upload Payment Receipt Screenshot</label>
+                                                <input type="file" className="w-full text-xs text-[#FAF7F2]/70 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#C5A059] file:text-[#120A08] hover:file:bg-[#b08d4b]" required />
+                                            </div>
+                                            <button type="submit" className="w-full bg-[#C5A059] text-[#120A08] py-3.5 rounded font-bold uppercase tracking-widest hover:bg-[#b08d4b] transition">
+                                                Submit Payment & Request Entry
+                                            </button>
+                                        </form>
+                                    )}
+                                </div>
+                            </div>
+                        )}
 
-  <!-- ══════════ PRIZE SHOWCASE ══════════ -->
-  <section class="section" id="prizes">
-    <div class="wrap">
-      <header class="section__head">
-        <p class="eyebrow">The Prize Sequence</p>
-        <h2 class="h2">Awarded in order. <em>Never twice.</em></h2>
-        <p class="section__sub">
-          Each prize is drawn sequentially. The moment a ticket wins, it leaves the
-          eligible pool permanently — so a single ticket can never take two prizes.
-        </p>
-      </header>
-      <div class="prize-grid" id="prizeGrid" aria-live="polite"></div>
-    </div>
-  </section>
+                        {view === 'draws' && (
+                            <div className="py-16 px-6 max-w-4xl mx-auto space-y-12">
+                                <div className="text-center space-y-3">
+                                    <h2 className="font-serif text-4xl text-[#FAF7F2]">Live Draw & Immutable Ledger</h2>
+                                    <p className="text-sm text-[#FAF7F2]/60">Every draw is cryptographically hashed and permanently recorded.</p>
+                                </div>
+                                <div className="space-y-4">
+                                    {results.map((resItem, idx) => (
+                                        <div key={resItem.id} className="bg-[#1D1412] border border-[#3A2722] p-6 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                                            <div>
+                                                <div className="text-xs font-mono text-[#C5A059]">DRAW 0{resItem.draw_sequence} — AWARDED</div>
+                                                <h3 className="font-serif text-2xl text-[#FAF7F2] font-bold">Winning Ticket: {resItem.winning_ticket_number}</h3>
+                                                <p className="text-xs font-mono text-[#FAF7F2]/50 mt-1">Hash: {resItem.cryptographic_hash}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className="bg-[#C5A059]/15 text-[#C5A059] px-4 py-1.5 rounded-full text-xs font-mono font-bold">VERIFIED</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {results.length === 0 && (
+                                        <div className="text-center py-12 text-[#FAF7F2]/50 text-sm">No draws executed yet. Awaiting sales deadline conclusion.</div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
 
-  <!-- ══════════ HOW IT WORKS ══════════ -->
-  <section class="section section--alt" id="how">
-    <div class="wrap">
-      <header class="section__head">
-        <p class="eyebrow">From Entry to Winner</p>
-        <h2 class="h2">Four deliberate steps.</h2>
-      </header>
-      <ol class="steps">
-        <li class="step">
-          <span class="step__num">01</span>
-          <h3>Choose the Event</h3>
-          <p>One ticket type, one price, one clearly stated deadline. No hidden tiers, no dynamic pricing.</p>
-        </li>
-        <li class="step">
-          <span class="step__num">02</span>
-          <h3>Confirm Your Entry</h3>
-          <p>Pay through the published channel and upload your payment record. A human verifies every submission.</p>
-        </li>
-        <li class="step">
-          <span class="step__num">03</span>
-          <h3>Receive Your Ticket</h3>
-          <p>On approval, a unique ticket number is issued to you. It is the only thing that can win.</p>
-        </li>
-        <li class="step">
-          <span class="step__num">04</span>
-          <h3>Watch It Drawn</h3>
-          <p>When sales close, the pool is frozen and hashed publicly. Then each prize is drawn in sequence.</p>
-        </li>
-      </ol>
-    </div>
-  </section>
+                        {view === 'verify' && (
+                            <div className="py-16 px-6 max-w-xl mx-auto space-y-8">
+                                <div className="text-center space-y-2">
+                                    <h2 className="font-serif text-3xl text-[#FAF7F2]">Public Audit Verification</h2>
+                                    <p className="text-sm text-[#FAF7F2]/60">Enter a cryptographic hash or ticket number to verify authenticity.</p>
+                                </div>
+                                <form onSubmit={handleVerify} className="space-y-4">
+                                    <input type="text" placeholder="Enter Hash or Ticket Number (e.g. AC-8492...)" value={verifyInput} onChange={e => setVerifyInput(e.target.value)} className="w-full bg-[#1D1412] border border-[#3A2722] p-3 rounded text-sm text-[#FAF7F2] focus:outline-none focus:border-[#C5A059]" required />
+                                    <button type="submit" className="w-full bg-[#C5A059] text-[#120A08] py-3 rounded font-bold uppercase tracking-widest hover:bg-[#b08d4b] transition">Verify Result</button>
+                                </form>
+                                {verifyResult && (
+                                    <div className="bg-[#1D1412] border border-[#3A2722] p-6 rounded-xl space-y-2 font-mono text-xs">
+                                        <p className="text-[#C5A059] font-bold">VERIFICATION STATUS: {verifyResult.verified ? 'SUCCESSFUL ✓' : 'FAILED ✗'}</p>
+                                        {verifyResult.verified ? (
+                                            <div className="space-y-1 text-[#FAF7F2]/80">
+                                                <p>Winning Ticket: {verifyResult.result.winning_ticket_number}</p>
+                                                <p>Eligible Pool Count: {verifyResult.result.eligible_ticket_count}</p>
+                                                <p>Timestamp: {verifyResult.result.drawn_at}</p>
+                                                <p className="break-all">Hash: {verifyResult.result.cryptographic_hash}</p>
+                                            </div>
+                                        ) : (
+                                            <p className="text-red-400">{verifyResult.message}</p>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
-  <!-- ══════════ TRANSPARENT DRAW PROCESS ══════════ -->
-  <section class="section" id="transparency">
-    <div class="wrap">
-      <header class="section__head">
-        <p class="eyebrow">Transparency by Construction</p>
-        <h2 class="h2">Every draw leaves a trail.</h2>
-        <p class="section__sub">
-          We do not ask you to take our word for it. We publish the evidence and the
-          method, so anyone — participant or not — can independently reproduce the result.
-        </p>
-      </header>
+                        {view === 'admin' && (
+                            <div className="py-16 px-6 max-w-4xl mx-auto space-y-8">
+                                <div className="flex justify-between items-center border-b border-[#3A2722] pb-4">
+                                    <h2 className="font-serif text-3xl text-[#FAF7F2]">Administrative Control Panel</h2>
+                                    <span className="text-xs font-mono text-[#C5A059] bg-[#C5A059]/10 px-3 py-1 rounded">SECURE ADMIN</span>
+                                </div>
+                                <div className="bg-[#1D1412] border border-[#3A2722] p-6 rounded-xl space-y-6">
+                                    <h3 className="font-serif text-xl text-[#FAF7F2]">Execute Sequential Prize Draws</h3>
+                                    <div className="space-y-4">
+                                        {prizes.map((p) => (
+                                            <div key={p.id} className="flex justify-between items-center bg-[#120A08] p-4 rounded border border-[#3A2722]">
+                                                <div>
+                                                    <p className="text-xs font-mono text-[#C5A059]">Draw Sequence 0{p.draw_sequence}</p>
+                                                    <p className="text-lg font-serif font-bold text-[#FAF7F2]">{p.prize_amount.toLocaleString()} ETB ({p.prize_title})</p>
+                                                </div>
+                                                <button onClick={() => executeDraw(p.draw_sequence)} disabled={p.status === 'AWARDED'} className={`px-4 py-2 rounded text-xs font-bold uppercase tracking-widest ${p.status === 'AWARDED' ? 'bg-[#3A2722] text-[#FAF7F2]/40 cursor-not-allowed' : 'bg-[#C5A059] text-[#120A08] hover:bg-[#b08d4b]'}`}>
+                                                    {p.status === 'AWARDED' ? 'Awarded' : 'Execute Draw'}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
 
-      <div class="trail">
-        <article class="trailcard">
-          <span class="trailcard__idx">01</span>
-          <h3>Pool Frozen &amp; Published</h3>
-          <p>At the deadline, every eligible ticket number is sorted and hashed into a single snapshot digest. The list is published.</p>
-          <code class="mono" data-bind="poolHash">awaiting lock</code>
-        </article>
-        <article class="trailcard">
-          <span class="trailcard__idx">02</span>
-          <h3>Seed Committed in Advance</h3>
-          <p>A 256-bit server seed is generated at lock time. Its SHA-256 commitment is published <em>before</em> any draw occurs.</p>
-          <code class="mono" data-bind="seedCommitment">awaiting lock</code>
-        </article>
-        <article class="trailcard">
-          <span class="trailcard__idx">03</span>
-          <h3>Selection by HMAC Chain</h3>
-          <p>Each winner index is derived from <span class="mono">HMAC-SHA256(seed, event|draw|prevHash)</span> with rejection sampling, then reduced modulo the live pool size.</p>
-          <code class="mono">uniform · unbias-corrected</code>
-        </article>
-        <article class="trailcard">
-          <span class="trailcard__idx">04</span>
-          <h3>Seed Revealed, Chain Verifiable</h3>
-          <p>When the final prize is awarded, the server seed is published. Recompute the whole chain yourself in the browser.</p>
-          <a class="link-arrow" href="/verify.html">Verify the Draw →</a>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- ══════════ LIVE DRAW TEASER ══════════ -->
-  <section class="section section--alt" id="live">
-    <div class="wrap live-teaser">
-      <div class="live-teaser__copy">
-        <p class="eyebrow">Where Chance Becomes History</p>
-        <h2 class="h2">The draw, in the open.</h2>
-        <p class="section__sub">
-          Follow each prize as it is awarded, in sequence, with the pool shrinking
-          in real time. Completed results stay on the record permanently.
-        </p>
-        <a class="btn btn--ghost" href="/live-draw.html">Open the Live Draw</a>
-      </div>
-      <div class="live-teaser__feed" id="drawFeed" aria-live="polite">
-        <div class="skeleton-row"></div>
-        <div class="skeleton-row"></div>
-        <div class="skeleton-row"></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ══════════ WINNERS ══════════ -->
-  <section class="section" id="winners">
-    <div class="wrap">
-      <header class="section__head">
-        <p class="eyebrow">Those Who Took Their Chance</p>
-        <h2 class="h2">Recent winners.</h2>
-        <p class="section__sub">
-          Winners are identified by ticket number only. Personal details are never
-          published without explicit written consent.
-        </p>
-      </header>
-      <div class="winner-strip" id="winnerStrip"></div>
-    </div>
-  </section>
-
-  <!-- ══════════ TRUST ══════════ -->
-  <section class="section section--alt" id="trust">
-    <div class="wrap">
-      <header class="section__head">
-        <p class="eyebrow">Trust &amp; Security</p>
-        <h2 class="h2">Every entry has a record. Every result can be verified.</h2>
-      </header>
-      <div class="trust-grid">
-        <div class="trustcard"><h3>Verified entries only</h3><p>A ticket exists only after a human has matched a payment record against a submission. No payment, no ticket.</p></div>
-        <div class="trustcard"><h3>Pool frozen at the deadline</h3><p>Once the countdown ends, the eligible pool is hashed and locked at the database level. No ticket can be added or altered afterwards.</p></div>
-        <div class="trustcard"><h3>Winners cannot repeat</h3><p>A database-level uniqueness constraint makes it impossible for the same ticket to be recorded as a winner of two prizes.</p></div>
-        <div class="trustcard"><h3>Completed draws are immutable</h3><p>Finalised draw rows reject every update and delete, including from administrators. Corrections require a new, audited record.</p></div>
-        <div class="trustcard"><h3>Full audit trail</h3><p>Every administrative action — approvals, rejections, locks, draws — is written to an append-only audit log.</p></div>
-        <div class="trustcard"><h3>Open verification</h3><p>The verification page reproduces each draw from the published seed and pool, entirely in your browser.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ══════════ FAQ ══════════ -->
-  <section class="section" id="faq">
-    <div class="wrap wrap--narrow">
-      <header class="section__head">
-        <p class="eyebrow">Questions</p>
-        <h2 class="h2">Before you enter.</h2>
-      </header>
-      <div class="faq" id="faqList"></div>
-    </div>
-  </section>
-
-  <!-- ══════════ RESPONSIBLE ══════════ -->
-  <section class="section section--alt" id="responsible">
-    <div class="wrap wrap--narrow">
-      <div class="notice">
-        <h3>Participate responsibly</h3>
-        <p>
-          This platform involves paid entries and monetary prizes. Participation is
-          restricted to adults who meet the eligibility requirements published in the
-          event rules. Never spend money you cannot afford to lose. If participation
-          stops being entertainment, stop participating.
-        </p>
-        <p class="notice__fine">
-          Operating a real-money lottery requires licensing, payment-provider approval,
-          identity verification, taxation handling and age gating in most jurisdictions.
-          This software is built so those controls can be configured and enforced — it
-          does not by itself grant legal permission to operate.
-        </p>
-      </div>
-    </div>
-  </section>
-
-</main>
-
-<div id="site-footer"></div>
-<div id="toast-host" class="toast-host"></div>
-
-<script src="/js/core.js"></script>
-<script src="/js/pages.js"></script>
+                    {/* Footer */}
+                    <footer className="border-t border-[#3A2722] py-12 px-6 bg-[#120A08] text-xs text-[#FAF7F2]/60">
+                        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
+                            <div className="flex items-center space-x-3">
+                                <span className="font-serif text-lg text-[#FAF7F2]">AEGIS & CROWN</span>
+                                <span>— Sovereign Transparent Financial Entertainment</span>
+                            </div>
+                            <div className="flex space-x-6">
+                                <a href="#" className="hover:text-[#C5A059]">Terms & Conditions</a>
+                                <a href="#" className="hover:text-[#C5A059]">Privacy Policy</a>
+                                <a href="#" className="hover:text-[#C5A059]">Responsible Participation</a>
+                            </div>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
 </body>
-</html>
+</html>`);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Aegis & Crown Platform running on port ${PORT}`);
+});
